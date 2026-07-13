@@ -73,7 +73,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:
-    name: Build signed Mobile and Leanback APKs
+    name: Build four signed Mobile and Leanback APKs
     needs: resolve
     if: needs.resolve.outputs.should_build == 'true'
     runs-on: ubuntu-latest
@@ -220,14 +220,30 @@ jobs:
           keyPassword=${KEY_PASSWORD}
           EOF_PROPERTIES
 
-      - name: Run tests and build release APKs
+      - name: Compute traceable Android version
+        id: version
+        env:
+          TV_DIR: ${{ github.workspace }}/sources/TV
+          SOURCE_REFS: ${{ github.workspace }}/build/source-refs.json
+        run: scripts/compute-version.sh
+
+      - name: Run all ABI tests and build four release APKs
         working-directory: sources/TV
+        env:
+          APP_VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          APP_VERSION_NAME: ${{ steps.version.outputs.version_name }}
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace \
+            "-PappVersionCode=${APP_VERSION_CODE}" \
+            "-PappVersionName=${APP_VERSION_NAME}" \
             :app:testLeanbackArmeabi_v7aDebugUnitTest \
+            :app:testLeanbackArm64_v8aDebugUnitTest \
+            :app:testMobileArmeabi_v7aDebugUnitTest \
             :app:testMobileArm64_v8aDebugUnitTest \
             :app:assembleLeanbackArmeabi_v7aRelease \
+            :app:assembleLeanbackArm64_v8aRelease \
+            :app:assembleMobileArmeabi_v7aRelease \
             :app:assembleMobileArm64_v8aRelease
 
       - name: Verify signatures and prepare release
@@ -235,11 +251,17 @@ jobs:
         env:
           TV_DIR: ${{ github.workspace }}/sources/TV
           SOURCE_REFS: ${{ github.workspace }}/build/source-refs.json
+          APP_VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          APP_VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          BASE_VERSION_CODE: ${{ steps.version.outputs.base_version_code }}
+          BASE_VERSION_NAME: ${{ steps.version.outputs.base_version_name }}
         run: |
           APKSIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -1)
           test -x "$APKSIGNER"
           scripts/prepare-release.sh
           "$APKSIGNER" verify --verbose --print-certs dist/TV-leanback-armeabi-v7a.apk
+          "$APKSIGNER" verify --verbose --print-certs dist/TV-leanback-arm64-v8a.apk
+          "$APKSIGNER" verify --verbose --print-certs dist/TV-mobile-armeabi-v7a.apk
           "$APKSIGNER" verify --verbose --print-certs dist/TV-mobile-arm64-v8a.apk
 
       - name: Upload workflow artifacts
@@ -259,9 +281,12 @@ jobs:
           make_latest: true
           files: |
             dist/TV-leanback-armeabi-v7a.apk
+            dist/TV-leanback-arm64-v8a.apk
+            dist/TV-mobile-armeabi-v7a.apk
             dist/TV-mobile-arm64-v8a.apk
             dist/SOURCE_REFS.json
             dist/SHA256SUMS.txt
+            dist/BUILD_INFO.json
 
   record:
     name: Record monitored source state
