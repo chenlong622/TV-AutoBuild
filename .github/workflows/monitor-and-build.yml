@@ -30,6 +30,7 @@ concurrency:
 
 env:
   NDK_VERSION: 28.2.13676358
+  FFMPEG_COMMIT: f947bc9c1532e7bcc95da11d9574cac3543490b3
 
 jobs:
   resolve:
@@ -153,6 +154,7 @@ jobs:
             "platform-tools" \
             "platforms;android-37.0" \
             "build-tools;36.0.0" \
+            "cmake;3.22.1" \
             "ndk;${NDK_VERSION}"
           python3.10 --version
           echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
@@ -203,6 +205,46 @@ jobs:
         run: |
           export NDK="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
           sources/TV/tools/build-av3a-from-source.sh
+
+      - name: Restore source-built FFmpeg decoder
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: sources/FongMi-media/libraries/decoder_ffmpeg/src/main/jni/ffmpeg
+          key: ffmpeg-android-${{ env.FFMPEG_COMMIT }}-media-${{ needs.resolve.outputs.media_sha }}-ndk-${{ env.NDK_VERSION }}
+
+      - name: Build FFmpeg decoder from pinned source
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        env:
+          MEDIA3_DIR: ${{ github.workspace }}/sources/FongMi-media
+        run: |
+          module_dir="${MEDIA3_DIR}/libraries/decoder_ffmpeg/src/main"
+          source_dir="${module_dir}/jni/ffmpeg"
+          mkdir -p "$source_dir"
+          git -C "$source_dir" init
+          git -C "$source_dir" remote add origin https://github.com/FongMi/FFmpeg.git
+          git -C "$source_dir" fetch --depth=1 origin "$FFMPEG_COMMIT"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$FFMPEG_COMMIT"
+          chmod +x "${module_dir}/jni/build_ffmpeg.sh"
+          "${module_dir}/jni/build_ffmpeg.sh" \
+            "$module_dir" \
+            "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" \
+            linux-x86_64 \
+            24 \
+            aac ac3 alac dca eac3 flac h264 hevc mp3 opus pcm_alaw pcm_mulaw truehd vorbis
+
+      - name: Verify source-built FFmpeg inputs
+        env:
+          MEDIA3_DIR: ${{ github.workspace }}/sources/FongMi-media
+        run: |
+          source_dir="${MEDIA3_DIR}/libraries/decoder_ffmpeg/src/main/jni/ffmpeg"
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$FFMPEG_COMMIT"
+          for abi in armeabi-v7a arm64-v8a; do
+            for library in avcodec avutil swresample swscale; do
+              test -s "${source_dir}/android-libs/${abi}/lib${library}.a"
+            done
+          done
 
       - name: Configure persistent autobuild signing
         working-directory: sources/TV
@@ -260,12 +302,37 @@ jobs:
           BASE_VERSION_NAME: ${{ steps.version.outputs.base_version_name }}
         run: |
           APKSIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -1)
+          AAPT=$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name aapt | sort -V | tail -1)
           test -x "$APKSIGNER"
+          test -x "$AAPT"
           scripts/prepare-release.sh
           "$APKSIGNER" verify --verbose --print-certs dist/TV-leanback-armeabi-v7a.apk
           "$APKSIGNER" verify --verbose --print-certs dist/TV-leanback-arm64-v8a.apk
           "$APKSIGNER" verify --verbose --print-certs dist/TV-mobile-armeabi-v7a.apk
           "$APKSIGNER" verify --verbose --print-certs dist/TV-mobile-arm64-v8a.apk
+          verify_apk() {
+            apk=$1
+            abi=$2
+            mode=$3
+            badging=$("$AAPT" dump badging "$apk")
+            grep -Fq "package: name='com.fongmi.android.tv' versionCode='${APP_VERSION_CODE}' versionName='${APP_VERSION_NAME}'" <<<"$badging" || return 1
+            grep -Fq "native-code: '${abi}'" <<<"$badging" || return 1
+            if [[ "$mode" == leanback ]]; then
+              grep -Fq "leanback-launchable-activity:" <<<"$badging" || return 1
+            else
+              if grep -Fq "leanback-launchable-activity:" <<<"$badging"; then return 1; fi
+            fi
+            entries=$(zipinfo -1 "$apk")
+            grep -Fxq "lib/${abi}/libav3aJNI.so" <<<"$entries" || return 1
+            grep -Fxq "lib/${abi}/libffmpegJNI.so" <<<"$entries" || return 1
+            other_abi=arm64-v8a
+            [[ "$abi" == arm64-v8a ]] && other_abi=armeabi-v7a
+            if grep -q "^lib/${other_abi}/" <<<"$entries"; then return 1; fi
+          }
+          verify_apk dist/TV-leanback-armeabi-v7a.apk armeabi-v7a leanback
+          verify_apk dist/TV-leanback-arm64-v8a.apk arm64-v8a leanback
+          verify_apk dist/TV-mobile-armeabi-v7a.apk armeabi-v7a mobile
+          verify_apk dist/TV-mobile-arm64-v8a.apk arm64-v8a mobile
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
