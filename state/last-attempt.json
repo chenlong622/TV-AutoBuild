@@ -4,7 +4,7 @@
     "TV": {
       "repository": "iptvorganization/TV",
       "branch": "fongmi",
-      "sha": "fdf2e4645cd89c56d05b0202b45b53a3d83cc206"
+      "sha": "9433eb9de628bb874ec268678c1ff3ec95e1f977"
     },
     "media": {
       "repository": "iptvorganization/media",
